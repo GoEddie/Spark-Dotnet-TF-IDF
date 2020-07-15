@@ -1,2 +1,3 @@
 This is the companion repo for: https://the.agilesql.club/2020/07/spark-.net-spark-ml-tf-idf/
 
+There is a c# version (see tf-idf/sparky) and an f# version (see tf-idf/Fpark)
