@@ -21,7 +21,7 @@ namespace sparky
 
             var sourceDir = args[0];
             var searchTerm = args[1];
-            
+
             var spark = SparkSession
                 .Builder()
                 .GetOrCreate();
@@ -36,38 +36,16 @@ namespace sparky
             var tokenizer = new Tokenizer()
                 .SetInputCol("Content")
                 .SetOutputCol("words");
-            
-            var idf = new IDF()
-                .SetInputCol("rawFeatures")
-                .SetOutputCol("features");
 
-                        
-            var sourceDocuments = GetSourceFiles(sourceDir).toDF();
-            sourceDocuments.Show();
-            
-            var words = tokenizer.Transform(sourceDocuments);
-            var featurizedData = hashingTF.Transform(words);
-            
-            var idfModel = idf.Fit(featurizedData);
-            
-            var rescaled = idfModel.Transform(featurizedData);
-            var filtered = rescaled.Select("Path", "features");
-            
-            var normalized = filtered.WithColumn("norm", udfCalcNorm(Col("features")));
+            var (idfModel, normalized) = GetModelAndNormalizedDataFrame(sourceDir, tokenizer, hashingTF);
 
-            var searchTermDataFrame = spark.CreateDataFrame(new List<string>() {searchTerm}).WithColumnRenamed("_1", "Content");
-            
-            searchTermDataFrame.Show();
-            var searchWords = tokenizer.Transform(searchTermDataFrame);
+            var searchTermTfIdf = GetSearchTermTFIDF(spark, searchTerm, tokenizer, hashingTF, idfModel);
 
-            var featurizedSeachTerm = hashingTF.Transform(searchWords);
-            
-            var search = idfModel.Transform(featurizedSeachTerm).WithColumnRenamed("features", "features2").WithColumn("norm2", udfCalcNorm(Col("features2")));
-            search.Show();
-            
-            var results = search.CrossJoin(normalized);
+            var results = searchTermTfIdf.CrossJoin(normalized);
+
             results
-                .WithColumn("similarity",udfCosineSimilarity(Col("features"), Col("features2"), Col("norm"), Col("norm2")))
+                .WithColumn("similarity",
+                    udfCosineSimilarity(Col("features"), Col("features2"), Col("norm"), Col("norm2")))
                 .Select("path", "similarity")
                 .Filter("similarity > 0.0")
                 .OrderBy(Desc("similarity"))
@@ -75,12 +53,62 @@ namespace sparky
                 .WithColumn("Search Term", Lit(searchTerm))
                 .Show(10, 100000);
         }
-        
+
+        static DataFrame toDF(List<Document> docs)
+        {
+            var rows = new List<GenericRow>();
+
+            var spark = SparkSession.Active();
+
+            foreach (var row in docs)
+            {
+                rows.Add(new GenericRow(new object[] {row.Path, row.Content}));
+            }
+
+            var schema = new StructType(new List<StructField>()
+            {
+                new StructField("Path", new StringType()),
+                new StructField("Content", new StringType())
+            });
+
+            return spark.CreateDataFrame(rows, schema);
+        }
+
+        private static DataFrame GetSearchTermTFIDF(SparkSession spark, string searchTerm,
+            Tokenizer tokenizer, HashingTF hashingTF, IDFModel idfModel)
+        {
+            var searchTermDataFrame = spark.CreateDataFrame(new List<string>() {searchTerm})
+                .WithColumnRenamed("_1", "Content");
+            var searchWords = tokenizer.Transform(searchTermDataFrame);
+            var featurizedSeachTerm = hashingTF.Transform(searchWords);
+            var search = idfModel.Transform(featurizedSeachTerm).WithColumnRenamed("features", "features2")
+                .WithColumn("norm2", udfCalcNorm(Col("features2")));
+            return search;
+        }
+
+        private static (IDFModel, DataFrame) GetModelAndNormalizedDataFrame(string sourceDir,
+            Tokenizer tokenizer, HashingTF hashingTF)
+        {
+            var sourceDocuments = toDF(GetSourceFiles(sourceDir));
+            var words = tokenizer.Transform(sourceDocuments);
+            var featurizedData = hashingTF.Transform(words);
+
+            var idf = new IDF()
+                .SetInputCol("rawFeatures")
+                .SetOutputCol("features");
+            var idfModel = idf.Fit(featurizedData);
+
+            var rescaled = idfModel.Transform(featurizedData);
+            var filtered = rescaled.Select("Path", "features");
+
+            return (idfModel, filtered.WithColumn("norm", udfCalcNorm(Col("features"))));
+        }
+
         private static readonly Func<Column, Column> udfCalcNorm = Udf<Row, double>(row =>
             {
                 var values = (ArrayList) row.Values[3];
                 var norm = 0.0;
-    
+
                 foreach (var value in values)
                 {
                     var d = (double) value;
@@ -102,7 +130,7 @@ namespace sparky
                     var valuesB = (ArrayList) vectorB.Values[3];
 
                     var dotProduct = 0.0;
-            
+
                     for (var i = 0; i < indicesA.Count; i++)
                     {
                         var valA = (double) valuesA[i];
@@ -123,7 +151,7 @@ namespace sparky
                     }
 
                     var divisor = normA * normB;
-            
+
                     return divisor == 0 ? 0 : dotProduct / divisor;
                 });
 
@@ -151,32 +179,10 @@ namespace sparky
             return documents;
         }
     }
-    
+
     internal class Document
     {
         public string Content;
         public string Path;
-    }
-    
-    internal static class ToDFExtensions{
-        public static DataFrame toDF(this List<Document> docs){
-
-            var rows = new List<GenericRow>();
-
-            var spark = SparkSession.Active();
-            
-            foreach(var row in docs){
-                rows.Add(new GenericRow(new object[]{row.Path, row.Content}));
-            }
-                
-            var schema = new StructType(new List<StructField>()
-            {
-                new StructField("Path", new StringType()),
-                new StructField("Content", new StringType())
-            });
-            
-            return spark.CreateDataFrame(rows, schema);
-        }
-        
     }
 }
